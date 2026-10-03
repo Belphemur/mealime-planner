@@ -45,6 +45,68 @@ export async function waitForCatalog(page: Page): Promise<void> {
   await expect(recipeCards(page).first()).toBeVisible({ timeout: 15_000 })
 }
 
+/**
+ * The code of the live room the header chip is showing.
+ *
+ * Read from the chip's `aria-label` (ADR-0049), which is now the ONLY
+ * place the chip says anything: the chip itself is a dot, and the owner's
+ * ruling took the word "Live" and the room code out of the header. The
+ * label is the thing a screen reader announces and the thing the tooltip
+ * bubble repeats, so a spec that scrapes it asserts the same sentence the
+ * user is shown.
+ */
+export async function liveRoomCode(page: Page): Promise<string> {
+  const chip = page.getByTestId('room-chip')
+  await expect(chip).toHaveAttribute('aria-label', /^Live room /, { timeout: 15_000 })
+  const label = await chip.getAttribute('aria-label')
+  const code = label?.match(/Live room ([a-z0-9-]+)/i)?.[1]
+  if (!code) throw new Error(`room chip carries no code: aria-label=${label}`)
+  return code
+}
+
+/**
+ * Acknowledge the congrats modal that a shared `?room=` link raises
+ * (ADR-0049), the way a person arriving on that link would.
+ *
+ * A no-op when the modal is not up, so a spec can call it after ANY link
+ * open without first having to know whether this page came through a link
+ * or through the household auto-join (ADR-0019, which must NOT open it).
+ */
+export async function dismissJoinCongrats(page: Page): Promise<void> {
+  const modal = page.getByTestId('join-congrats')
+  if ((await modal.count()) === 0) return
+  await page.getByTestId('join-congrats-continue').click()
+  await expect(modal).toHaveCount(0)
+}
+
+/**
+ * The number the relay reports as live in this device's room, read off the
+ * chip's `aria-label` (ADR-0049).
+ *
+ * The chip is a DOT, so the headcount has exactly one textual carrier —
+ * `Live room <code>, <N> in room` — and that is what this reads. The
+ * badge-dot (`room-chip-count`) is the same number rendered visually when
+ * the count is 2 or more, but it is absent at 1, so it cannot be the
+ * thing a helper waits on. Polled, because the count arrives on a `peers`
+ * frame sent by a second socket.
+ */
+export async function liveRoomPeers(page: Page, timeout = 15_000): Promise<number> {
+  const chip = page.getByTestId('room-chip')
+  await expect(chip).toBeAttached({ timeout })
+  await expect
+    .poll(
+      async () => {
+        const label = (await chip.getAttribute('aria-label')) ?? ''
+        const n = label.match(/, (\d+) in room/)?.[1]
+        return n === undefined ? null : Number(n)
+      },
+      { timeout, message: 'the room chip never reported a headcount' },
+    )
+    .not.toBeNull()
+  const label = (await chip.getAttribute('aria-label')) ?? ''
+  return Number(label.match(/, (\d+) in room/)![1])
+}
+
 /** Open the first recipe card and wait for the detail sheet. Returns the recipe name. */
 export async function openFirstRecipeDetail(page: Page): Promise<string> {
   await recipeCards(page).first().click()

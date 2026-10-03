@@ -312,6 +312,21 @@ export class Room extends DurableObject<Env> {
   }
 
   /**
+   * Tell every hibernated peer how many of them there are (ADR-0049).
+   *
+   * The count itself is the CORE's (`livePeers + 1` on the admission
+   * verdict); walking the peer set is the adapter's, because
+   * `ctx.getWebSockets()` is the Durable Object's only notion of "live
+   * peer" — the Bun relay walks a `Set` instead. A refused socket is never
+   * hibernated (`#refuse` uses `accept()`), so it cannot inflate the
+   * count; a socket that died mid-send is guarded by `#send`'s try/catch.
+   */
+  #broadcastPeers(): void {
+    const frame: RelayMessage = { type: 'peers', count: this.ctx.getWebSockets().length }
+    for (const peer of this.ctx.getWebSockets()) this.#send(peer, frame)
+  }
+
+  /**
    * Hibernatable accept, tagged with this peer's id. The serial comes
    * from the core, which keeps it monotone across a re-creation of this
    * code, so an id is never handed out twice within a code's history.
@@ -365,10 +380,13 @@ export class Room extends DurableObject<Env> {
       // `created` carries the code's rev FLOOR, never the room's current
       // rev: the client seeds above it, so a re-created room cannot pass a
       // stale snapshot off as newer (review F4).
-      this.#send(server, { type: 'created', code: verdict.code, rev: verdict.rev })
+      this.#send(server, { type: 'created', code: verdict.code, rev: verdict.rev, count: verdict.count })
     } else {
-      this.#send(server, { type: 'joined', code: verdict.code, rev: verdict.rev, state: verdict.state })
+      this.#send(server, { type: 'joined', code: verdict.code, rev: verdict.rev, state: verdict.state, count: verdict.count })
     }
+    // Everyone learns the new headcount, the joiner included (its own
+    // frame already carries it; the fan-out keeps the rest in step).
+    this.#broadcastPeers()
     return new Response(null, { status: 101, webSocket: client })
   }
 
@@ -432,6 +450,11 @@ export class Room extends DurableObject<Env> {
       case 'leave': {
         this.#send(ws, { type: 'left' })
         ws.close(1000, 'left')
+        // The peer is still hibernated at this point (its close handler runs
+        // after), so the count is broadcast from `webSocketClose` once the
+        // runtime has actually reaped it. Announcing `size - 1` here would
+        // be right by arithmetic and wrong in fact if the socket did not
+        // close cleanly.
         return
       }
 
@@ -452,8 +475,8 @@ export class Room extends DurableObject<Env> {
         this.#send(
           ws,
           msg.type === 'create'
-            ? { type: 'created', code: this.#code, rev: this.#room.floor() }
-            : { type: 'joined', code: this.#code, rev: row.rev, state: row.state },
+            ? { type: 'created', code: this.#code, rev: this.#room.floor(), count: this.ctx.getWebSockets().length }
+            : { type: 'joined', code: this.#code, rev: row.rev, state: row.state, count: this.ctx.getWebSockets().length },
         )
         return
       }
@@ -480,15 +503,17 @@ export class Room extends DurableObject<Env> {
   /* ------------------------------------------------------------------ close */
 
   /**
-   * A peer left. Deliberately a no-op beyond what the runtime already
-   * did: ADR-0038 §4 keeps the room row until the clocks fire, so a
-   * phone that reloads mid-cook comes back to its plan — which is also
-   * why `leave` is never called on the core from here. The only thing
-   * left to do is make sure the room is not holding an alarm for a room
-   * that is still alive — which it legitimately is.
+   * A peer left. Deliberately a no-op beyond the peer count: ADR-0038 §4
+   * keeps the room row until the clocks fire, so a phone that reloads
+   * mid-cook comes back to its plan — which is also why `leave` is never
+   * called on the core from here. The runtime has already removed this
+   * socket from the hibernation set by the time the handler runs, so
+   * `getWebSockets().length` is the headcount AFTER the departure
+   * (ADR-0049). With nobody left there is no recipient for the frame, and
+   * the DO will be evicted with the row still on its expiry clocks.
    */
   async webSocketClose(ws: WebSocket): Promise<void> {
-    void ws
+    if (this.ctx.getWebSockets().length > 0) this.#broadcastPeers()
   }
 
   /** Same story as close: a dropped transport is not a room deletion. */

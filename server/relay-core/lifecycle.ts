@@ -101,14 +101,23 @@ export interface RoomStore {
 
 /* ------------------------------------------------------------------ verdicts */
 
-/** What the core decided an upgrade should be answered with. */
+/**
+ * What the core decided an upgrade should be answered with.
+ *
+ * `count` is the live membership INCLUDING the peer being admitted, and it
+ * is computed HERE rather than by each adapter: the core already receives
+ * `livePeers`, so `livePeers + 1` is the one arithmetic both relays must
+ * agree on (ADR-0049). Only the socket-set broadcast of later changes
+ * stays in the adapters, because which sockets belong to a room is exactly
+ * what differs between a Bun `Set` and a hibernated Durable Object.
+ */
 export type Admission =
   /** Refuse: the code is unusable, or a live room already holds it. */
   | { kind: 'refuse'; error: RelayErrorCode }
   /** The room is being established (create into an unheld code, or a join the relay never knew). */
-  | { kind: 'establish'; code: string; rev: number }
+  | { kind: 'establish'; code: string; rev: number; count: number }
   /** An existing room admitted this peer; the snapshot may be adopted. */
-  | { kind: 'join'; code: string; rev: number; state: SharedSnapshot | null }
+  | { kind: 'join'; code: string; rev: number; state: SharedSnapshot | null; count: number }
 
 export type RoomReply = Admission | { kind: 'message'; reply: RelayMessage }
 
@@ -271,7 +280,7 @@ export function createRoomRegistry({
    * with no stored room land here — the same event with the same reply,
    * which is what join-or-create means.
    */
-  function establish(): Admission {
+  function establish(count: number): Admission {
     const t = now()
     const floor = floorRev()
     // The serial is NOT bumped here: the adapter that admits the peer mints
@@ -288,26 +297,29 @@ export function createRoomRegistry({
       serial,
     })
     arm(Math.min(t + inactivityTtlMs, t + idleTtlMs))
-    return { kind: 'establish', code, rev: floor }
+    return { kind: 'establish', code, rev: floor, count }
   }
 
   function admit(mode: 'create' | 'join', livePeers: number): Admission {
     const existing = store.read()
+    // The count every admission reports: the peers already attached plus
+    // the one about to be (ADR-0049).
+    const count = livePeers + 1
     if (mode === 'create') {
       // A stored room that nobody is in is, logically, gone — the room is
       // deleted when its last peer leaves (ADR-0026), so a `create` lands
       // on a fresh room either way. What survives the deletion is the rev
       // FLOOR, and the `created` reply carries it.
       if (existing && livePeers > 0) return { kind: 'refuse', error: RELAY_ERRORS.codeTaken }
-      return establish()
+      return establish(count)
     }
     // join-or-create (ADR-0026): the first peer to arrive under a code the
     // relay has never seen ESTABLISHES the room and is answered `created`.
     // `not_found` for an unusable code shape is the adapter's call — it is
     // the one that parsed the URL/message.
-    if (!existing) return establish()
+    if (!existing) return establish(count)
     const row = touch(existing)
-    return { kind: 'join', code, rev: row.rev, state: row.state }
+    return { kind: 'join', code, rev: row.rev, state: row.state, count }
   }
 
   function keepalive(): { kind: 'ok' } | { kind: 'refuse'; error: RelayErrorCode } {

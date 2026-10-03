@@ -30,9 +30,16 @@ export type ClientMessage =
 /** What a relay sends. */
 export type RelayMessage =
   /** The room now exists (create, or a join that established it). `rev` is the per-code floor. */
-  | { type: 'created'; code: string; rev: number }
+  | { type: 'created'; code: string; rev: number; count: number }
   /** An existing room admitted this peer; `state` is null until the first push. */
-  | { type: 'joined'; code: string; rev: number; state: SharedSnapshot | null }
+  | { type: 'joined'; code: string; rev: number; state: SharedSnapshot | null; count: number }
+  /**
+   * Live membership count, broadcast to EVERY peer on every membership
+   * change (ADR-0049). `count` is the number of ATTACHED peers AFTER the
+   * change, so the joining peer is included in the frame it receives with
+   * its own `created`/`joined` too.
+   */
+  | { type: 'peers'; count: number }
   /** Fan-out of a peer's push, to every peer EXCEPT the sender. */
   | { type: 'state'; rev: number; state: SharedSnapshot; from: string }
   /** Answer to `keepalive`. Deliberately not `pong` — that is the socket-level beat. */

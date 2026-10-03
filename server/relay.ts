@@ -257,6 +257,21 @@ const throttle = makeThrottle({
 
 /* -------------------------------------------------------------- membership */
 
+/**
+ * Tell every attached peer how many of them there are (ADR-0049).
+ *
+ * Membership is the ONE thing the core cannot broadcast: which sockets
+ * belong to a room is the whole difference between a Bun `Set` and a
+ * hibernated Durable Object, so each adapter walks its own peer set. The
+ * arithmetic and the policy ("on every membership change") are shared.
+ * A peer whose socket has already died is skipped by `send`'s guard, so a
+ * stale socket cannot turn a fan-out into an exception.
+ */
+function broadcastPeers(room: Room): void {
+  const frame: RelayMessage = { type: 'peers', count: room.peers.size }
+  for (const peer of room.peers) send(peer, frame)
+}
+
 /** Put a socket into `code`, detaching it from any previous room first. */
 function attach(ws: Socket, code: string): void {
   // Already in this room: DO NOT detach. `detach` runs `leave`, and a
@@ -287,6 +302,9 @@ function detach(ws: Socket): void {
   ws.data.roomCode = undefined
   if (!room) return
   room.peers.delete(ws)
+  // Everyone who is left learns the new headcount before the room may drop
+  // (it cannot if nobody is left — the fan-out would have no recipient).
+  if (room.peers.size > 0) broadcastPeers(room)
   if (room.registry.leave(room.peers.size).dropped && room.timer) {
     // The room is gone, so its wake-up has nothing left to decide — clear
     // it. An armed 24h timer would keep the Room object (and its peer set)
@@ -323,12 +341,24 @@ function admit(ws: Socket, code: string, mode: 'create' | 'join'): void {
   attach(ws, code)
   // `rev` is the per-code FLOOR, never the room's current rev: a client
   // seeds above it, so a re-created room cannot pass a stale snapshot off
-  // as newer (review F4).
+  // as newer (review F4). `count` is the headcount after this peer joined
+  // (ADR-0049) — the same number `broadcastPeers` is about to tell the
+  // room, stitched in so the joining peer learns it without waiting for a
+  // second frame.
+  //
+  // Clamped to the set's real size: `attach` deliberately keeps a socket
+  // that re-joins the room it is ALREADY in, so `livePeers + 1` from the
+  // core would report one more peer than exists. The clamp is adapter
+  // work on purpose — only the adapter knows whether `attach` grew the
+  // set. (The `peers` fan-out below reports the same size, so a clamped
+  // join is confirmed a frame later.)
+  const count = Math.min(verdict.count, room.peers.size)
   if (verdict.kind === 'establish') {
-    send(ws, { type: 'created', code: verdict.code, rev: verdict.rev })
+    send(ws, { type: 'created', code: verdict.code, rev: verdict.rev, count })
   } else {
-    send(ws, { type: 'joined', code: verdict.code, rev: verdict.rev, state: verdict.state })
+    send(ws, { type: 'joined', code: verdict.code, rev: verdict.rev, state: verdict.state, count })
   }
+  broadcastPeers(room)
 }
 
 /**

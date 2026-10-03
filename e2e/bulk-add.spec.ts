@@ -1,8 +1,10 @@
 import { expect, test, type Page } from '@playwright/test'
 import {
   blockExternalRequests,
+  dismissJoinCongrats,
   expectZeroMealimeRequests,
   gotoTab,
+  liveRoomCode,
   openFirstRecipeDetail,
   waitForCatalog,
 } from './helpers'
@@ -146,10 +148,7 @@ test('suggestion row mirrors room-synced customs from another context', async ({
   await gotoTab(a, 'Plan')
   await a.getByRole('button', { name: 'Share', exact: true }).click()
   await a.getByTestId('start-room').click()
-  const chip = a.getByTestId('room-chip')
-  await expect(chip).toContainText('Live', { timeout: 10_000 })
-  const title = await chip.getAttribute('title')
-  const code = title!.match(/Live room ([a-z0-9-]+)/)![1]
+  const code = await liveRoomCode(a)
   const roomUrl = `${a.url().replace(/\/plan.*$/, '')}/plan?room=${code}`
 
   // B joins in a FRESH context and gets A's remembered customs.
@@ -157,7 +156,8 @@ test('suggestion row mirrors room-synced customs from another context', async ({
   const b = await ctxB.newPage()
   await blockExternalRequests(b)
   await b.goto(roomUrl)
-  await expect(b.getByTestId('room-chip')).toContainText('Live', { timeout: 10_000 })
+  await expect(b.getByTestId('room-chip')).toHaveAttribute('aria-label', /^Live room /, { timeout: 10_000 })
+  await dismissJoinCongrats(b)
   await b.goto('/grocery')
 
   // B types a prefix — the synced custom shows as a mine row with the

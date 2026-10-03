@@ -83,6 +83,10 @@ const COLOR_TOKENS: Record<string, string> = {
   'nutrition-fat-soft': '--color-nutrition-fat-soft',
   warning: '--color-warning',
   'warning-soft': '--color-warning-soft',
+  success: '--color-success',
+  'success-soft': '--color-success-soft',
+  // Foreground ON a success fill (the header chip's badge-dot, ADR-0049).
+  'on-success': '--color-on-success',
   danger: '--color-danger',
   'danger-soft': '--color-danger-soft',
   favourite: '--color-favourite',

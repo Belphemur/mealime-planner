@@ -1,8 +1,10 @@
 import { expect, test, type Page } from '@playwright/test'
 import {
   blockExternalRequests,
+  dismissJoinCongrats,
   expectZeroMealimeRequests,
   gotoTab,
+  liveRoomCode,
   waitForCatalog,
 } from './helpers'
 
@@ -474,16 +476,15 @@ test('room sync: generated plan reaches the second context', async ({ browser })
   // Start a live room from A's share sheet.
   await a.getByRole('button', { name: 'Share', exact: true }).click()
   await a.getByTestId('start-room').click()
-  await expect(a.getByTestId('room-chip')).toContainText('Live', { timeout: 10_000 })
-  const chipTitle = await a.getByTestId('room-chip').getAttribute('title')
-  const code = chipTitle!.match(/Live room ([a-z0-9-]+)/)![1]
+  const code = await liveRoomCode(a)
   const roomUrl = `${a.url().replace(/\/plan.*$/, '')}/plan?room=${code}`
 
   const ctxB = await browser.newContext()
   const b = await ctxB.newPage()
   await blockExternalRequests(b)
   await b.goto(roomUrl)
-  await expect(b.getByTestId('room-chip')).toContainText('Live', { timeout: 10_000 })
+  await expect(b.getByTestId('room-chip')).toHaveAttribute('aria-label', /^Live room /, { timeout: 10_000 })
+  await dismissJoinCongrats(b)
 
   // The plan generated in A arrives in B: A keeps it, B joins mid-plan.
   await expect

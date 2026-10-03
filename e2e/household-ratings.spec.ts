@@ -1,8 +1,10 @@
 import { expect, test, type Page } from '@playwright/test'
 import {
   blockExternalRequests,
+  dismissJoinCongrats,
   expectZeroMealimeRequests,
   gotoTab,
+  liveRoomCode,
   openFirstRecipeDetail,
   recipeCards,
   waitForCatalog,
@@ -70,10 +72,7 @@ async function startLiveRoom(page: Page): Promise<string> {
   await gotoTab(page, 'Plan')
   await page.getByRole('button', { name: 'Share', exact: true }).click()
   await page.getByTestId('start-room').click()
-  const chip = page.getByTestId('room-chip')
-  await expect(chip).toContainText('Live', { timeout: 10_000 })
-  const title = await chip.getAttribute('title')
-  const code = title!.match(/Live room ([a-z0-9-]+)/)![1]
+  const code = await liveRoomCode(page)
   const url = `${page.url().replace(/\/plan.*$/, '')}/plan?room=${code}`
   // The share sheet is a modal that would swallow the next nav click; the
   // room survives a full navigation (the code lives in sessionStorage).
@@ -215,7 +214,8 @@ test('room: a favourite and a rating reach the other phone live', async ({ brows
   const b = await ctxB.newPage()
   await blockExternalRequests(b)
   await b.goto(roomUrl)
-  await expect(b.getByTestId('room-chip')).toContainText('Live', { timeout: 10_000 })
+  await expect(b.getByTestId('room-chip')).toHaveAttribute('aria-label', /^Live room /, { timeout: 10_000 })
+  await dismissJoinCongrats(b)
   await gotoTab(b, 'Recipes')
   const cardB = recipeCards(b).filter({ has: b.getByRole('heading', { name, exact: true }) })
   await expect(cardB.getByTestId('rating-stars')).toHaveAttribute('data-rating', '4.5')
@@ -262,7 +262,8 @@ test('room: the LAST rating written wins, and both devices agree', async ({ brow
   const b = await ctxB.newPage()
   await blockExternalRequests(b)
   await b.goto(roomUrl)
-  await expect(b.getByTestId('room-chip')).toContainText('Live', { timeout: 10_000 })
+  await expect(b.getByTestId('room-chip')).toHaveAttribute('aria-label', /^Live room /, { timeout: 10_000 })
+  await dismissJoinCongrats(b)
   await gotoTab(b, 'Recipes')
   const cardB = recipeCards(b).filter({ has: b.getByRole('heading', { name, exact: true }) })
   await cardB.getByRole('button', { name: 'Rate 5 of 5 stars' }).click()
@@ -329,7 +330,8 @@ test('room: an un-star reaches the other phone and is not resurrected', async ({
   const b = await ctxB.newPage()
   await blockExternalRequests(b)
   await b.goto(roomUrl)
-  await expect(b.getByTestId('room-chip')).toContainText('Live', { timeout: 10_000 })
+  await expect(b.getByTestId('room-chip')).toHaveAttribute('aria-label', /^Live room /, { timeout: 10_000 })
+  await dismissJoinCongrats(b)
   await gotoTab(b, 'Recipes')
   const cardB = recipeCards(b).filter({ has: b.getByRole('heading', { name, exact: true }) })
   await expect(cardB.getByRole('button', { name: 'Remove from favourites' })).toBeVisible()

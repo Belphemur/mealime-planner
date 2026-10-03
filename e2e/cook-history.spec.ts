@@ -1,8 +1,10 @@
 import { expect, test, type Page } from '@playwright/test'
 import {
   blockExternalRequests,
+  dismissJoinCongrats,
   expectZeroMealimeRequests,
   gotoTab,
+  liveRoomCode,
   openFirstRecipeDetail,
   openRecipeDetail,
   visibleVariantIds,
@@ -36,10 +38,7 @@ async function startLiveRoom(page: Page): Promise<string> {
   await gotoTab(page, 'Plan')
   await page.getByRole('button', { name: 'Share', exact: true }).click()
   await page.getByTestId('start-room').click()
-  const chip = page.getByTestId('room-chip')
-  await expect(chip).toContainText('Live', { timeout: 10_000 })
-  const title = await chip.getAttribute('title')
-  const code = title!.match(/Live room ([a-z0-9-]+)/)![1]
+  const code = await liveRoomCode(page)
   return `${page.url().replace(/\/plan.*$/, '')}/plan?room=${code}`
 }
 
@@ -207,7 +206,8 @@ test('cooked history is shared by default: B in the room sees A cooked meals', a
   const b = await ctxB.newPage()
   await blockExternalRequests(b)
   await b.goto(roomUrl)
-  await expect(b.getByTestId('room-chip')).toContainText('Live', { timeout: 10_000 })
+  await expect(b.getByTestId('room-chip')).toHaveAttribute('aria-label', /^Live room /, { timeout: 10_000 })
+  await dismissJoinCongrats(b)
 
   // B got the SHARED plan state AND the cooked history (ADR-0032).
   await b.goto('/history')
@@ -241,7 +241,8 @@ test('an explicit opt-out keeps cooked history off the wire (ADR-0032)', async (
   const b = await ctxB.newPage()
   await blockExternalRequests(b)
   await b.goto(roomUrl)
-  await expect(b.getByTestId('room-chip')).toContainText('Live', { timeout: 10_000 })
+  await expect(b.getByTestId('room-chip')).toHaveAttribute('aria-label', /^Live room /, { timeout: 10_000 })
+  await dismissJoinCongrats(b)
 
   // The shared plan arrived; the opted-out history did NOT.
   await b.goto('/history')

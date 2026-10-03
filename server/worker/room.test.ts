@@ -264,6 +264,66 @@ describe('join-or-create', () => {
   })
 })
 
+describe('peer count (ADR-0049)', () => {
+
+  
+
+  it('stitches the headcount into created and joined', async () => {
+    const room = nextRoom()
+    const a = await dial(`/?op=create&room=${room}`)
+    // The first peer counts ITSELF: `count` is livePeers + 1, computed by
+    // the core so both runtimes agree (ADR-0040).
+    expect(await a.expect('created')).toMatchObject({ count: 1 })
+    const b = await dial(`/?op=join&room=${room}`)
+    expect(await b.expect('joined')).toMatchObject({ count: 2 })
+    a.close()
+    b.close()
+  })
+
+  it('broadcasts the new count to EVERY peer on a join, and again on a departure', async () => {
+    const room = nextRoom()
+    const a = await dial(`/?op=create&room=${room}`)
+    await a.expect('created')
+    // Drain a's own `peers` fan-out for its own admission (count 1).
+    expect(await a.expect('peers')).toMatchObject({ type: 'peers', count: 1 })
+
+    const b = await dial(`/?op=join&room=${room}`)
+    await b.expect('joined')
+    // The peer ALREADY in the room is told; a fan-out that only reached the
+    // joiner would make the first household member's chip permanently lie.
+    expect(await a.expect('peers')).toMatchObject({ type: 'peers', count: 2 })
+
+    // A departure. Asserted on `a`'s frame, NOT on `b.closed`: the
+    // client-side `close` event takes ~10 s to surface in the pool (the
+    // runtime hands it over long after the DO's close handler has already
+    // run), while the `peers` fan-out the handler sends arrives in
+    // milliseconds. The assertion is about the fan-out anyway.
+    b.close()
+    expect(await a.expect('peers')).toMatchObject({ type: 'peers', count: 1 })
+    a.close()
+  })
+
+  it('does not count a REFUSED socket', async () => {
+    // `#refuse` uses `accept()`, not `ctx.acceptWebSocket`, so a refused
+    // socket is never hibernated and can never inflate the headcount.
+    const room = nextRoom()
+    const a = await dial(`/?op=create&room=${room}`)
+    await a.expect('created')
+    await a.expect('peers')
+    const b = await dial(`/?op=create&room=${room}`) // code_taken
+    expect(await b.expectError('code_taken')).toMatchObject({ code: 'code_taken' })
+    await b.closed
+    // The refusal is NOT a membership change: the next admission's count is
+    // 2, not 3. Asserted through `c` so the wait is on a frame that the
+    // refusal provably did not produce.
+    const c = await dial(`/?op=join&room=${room}`)
+    expect(await c.expect('joined')).toMatchObject({ count: 2 })
+    expect(await a.expect('peers')).toMatchObject({ type: 'peers', count: 2 })
+    a.close()
+    c.close()
+  })
+})
+
 describe('state', () => {
   it('fans out to every peer EXCEPT the sender, with the sender id', async () => {
     const room = nextRoom()

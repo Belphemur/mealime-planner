@@ -733,6 +733,55 @@ describe('room store — terminal errors stop the loop', () => {
   })
 })
 
+describe('room store — peer count is the relay\'s to report (ADR-0049)', () => {
+  test('starts unknown, then reads the count off the admission frame', async () => {
+    const room = useRoomStore()
+    // "Unknown" is a real third state, distinct from any number: the views
+    // render it differently from a room with one member.
+    expect(room.peers).toBeNull()
+    room.join('mauve-peacock-candle')
+    await sleep(5)
+    const socket = sockets[sockets.length - 1]
+    socket.receive({ type: 'created', code: 'mauve-peacock-candle', rev: 0, count: 3 })
+    expect(room.peers).toBe(3)
+  })
+
+  test('a `peers` fan-out moves the count without touching anything else', async () => {
+    const { room, socket } = await startRoom()
+    socket.receive({ type: 'created', code: 'mauve-peacock-candle', rev: 0, count: 1 })
+    socket.receive({ type: 'peers', count: 2 })
+    expect(room.peers).toBe(2)
+    // A departure is the same frame with a smaller number — nothing
+    // distinguishes leaving from joining, and nothing should.
+    socket.receive({ type: 'peers', count: 1 })
+    expect(room.peers).toBe(1)
+    expect(room.status).toBe<RoomStatus>('live')
+    expect(room.code).toBe('mauve-peacock-candle')
+  })
+
+  test('a nonsense count is ignored rather than displayed', async () => {
+    const { room, socket } = await startRoom()
+    socket.receive({ type: 'created', code: 'mauve-peacock-candle', rev: 0, count: 2 })
+    // A relay we do not recognise could send anything; a count of zero in
+    // a room this socket is in is a lie, and a fractional one is not a
+    // headcount. Both leave the last known value alone.
+    for (const bogus of [0, -1, 1.5, 'two', null, undefined]) {
+      socket.receive({ type: 'peers', count: bogus })
+      expect(room.peers).toBe(2)
+    }
+  })
+
+  test('leaving forgets the count — it described that room', async () => {
+    const { room, socket } = await startRoom()
+    socket.receive({ type: 'peers', count: 4 })
+    expect(room.peers).toBe(4)
+    room.leave()
+    // Otherwise a chip keeps reading "4 in room" for a room this device
+    // is no longer in.
+    expect(room.peers).toBeNull()
+  })
+})
+
 describe('room store — the plan identity is household state (ADR-0034)', () => {
   test('a peer adopts the room\'s plan identity, so cooks group the same way on both phones', async () => {
     const plan = usePlanStore()
@@ -826,5 +875,92 @@ describe('room store — the plan identity is household state (ADR-0034)', () =>
     // the identity captured before the mark, not the (now empty) one.
     expect(sent.cookedHistory[0].planId).toBe(identity.planId)
     expect(sent.cookedHistory[0].planCreatedAt).toBe(identity.planCreatedAt)
+  })
+})
+
+/**
+ * `freshJoin` (ADR-0049 addendum): the ONE signal that separates "somebody
+ * asked to be in a room" from "the store re-established the room on its
+ * own". The app shell lands a fresh joiner with an empty plan on the
+ * recipes list, and this flag is the whole guard — so the two false
+ * positives (a page reload, a dropped socket) matter more than the happy
+ * path, and each gets its own test.
+ */
+describe('the fresh-join signal', () => {
+  test('a deliberate join arms it and a live answer does NOT disarm it', async () => {
+    expect(store.freshJoin).toBe(false)
+    store.join('amber-falcon-lantern')
+    expect(store.freshJoin).toBe(true)
+    await sleep(5)
+    const socket = sockets[sockets.length - 1]
+    socket.receive({ type: 'joined', code: 'amber-falcon-lantern', rev: 3, count: 1 })
+    // Still armed: the consumer is the app shell's watcher on this very
+    // transition, so clearing it on `live` would swallow the landing.
+    expect(store.freshJoin).toBe(true)
+    expect(store.status).toBe('live')
+  })
+
+  test('a deliberate create arms it too (Settings → New code)', async () => {
+    store.create()
+    expect(store.freshJoin).toBe(true)
+  })
+
+  test('a page-reload RESUME never arms it', async () => {
+    // Exactly what onMounted does on a reload: a code in sessionStorage
+    // and no deliberate call. Landing somebody on the recipes list
+    // because they reloaded /plan would be a bug, not a feature.
+    sessionStorage.setItem(ROOM_CODE_KEY, 'rose-thistle-moss')
+    expect(store.resume()).toBe(true)
+    expect(store.freshJoin).toBe(false)
+    await sleep(5)
+    sockets[sockets.length - 1].receive({ type: 'joined', code: 'rose-thistle-moss', rev: 1 })
+    expect(store.status).toBe('live')
+    expect(store.freshJoin).toBe(false)
+  })
+
+  test('an automatic RECONNECT disarms it, even with an empty plan', async () => {
+    const { socket } = await startRoom()
+    store.freshJoin = false // the app shell consumed it on the first live
+    socket.close() // the relay went away
+    expect(store.status).toBe('connecting')
+    await sleep(BACKOFF_MS + 200) // the reconnect timer fires
+    const rejoined = sockets[sockets.length - 1]
+    expect(rejoined.url).toContain('mauve-peacock-candle')
+    rejoined.receive({ type: 'joined', code: 'mauve-peacock-candle', rev: 1 })
+    expect(store.status).toBe('live')
+    // This is the regression the flag exists for: a live room, an empty
+    // plan, and still no navigation.
+    expect(store.freshJoin).toBe(false)
+  })
+
+  test('the ADR-0019 household AUTO-join is deliberately unarmed (review kody)', async () => {
+    // It runs on EVERY launch of a device with a saved household room, so
+    // arming it would move somebody off the tab they opened, once per
+    // session, for a join they did not ask for this time round.
+    store.join('amber-falcon-lantern', false)
+    expect(store.freshJoin).toBe(false)
+    await sleep(5)
+    sockets[sockets.length - 1].receive({ type: 'joined', code: 'amber-falcon-lantern', rev: 1 })
+    expect(store.status).toBe('live')
+    expect(store.freshJoin).toBe(false)
+  })
+
+  test('leave() disarms it — a stale flag cannot navigate later', async () => {
+    await startRoom()
+    store.leave()
+    expect(store.freshJoin).toBe(false)
+  })
+
+  test('a refused code disarms it instead of failing to arm', async () => {
+    store.join('not-a-code')
+    expect(store.status).toBe('error')
+    expect(store.freshJoin).toBe(false)
+  })
+
+  test('a room_expired answer disarms it', async () => {
+    const { socket } = await startRoom()
+    socket.receive({ type: 'error', code: 'room_expired' })
+    expect(store.status).toBe('error')
+    expect(store.freshJoin).toBe(false)
   })
 })

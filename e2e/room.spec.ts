@@ -1,5 +1,12 @@
 import { expect, test, type Page } from '@playwright/test'
-import { blockExternalRequests, gotoTab, openFirstRecipeDetail, waitForCatalog, recipeCards } from './helpers'
+import {
+  blockExternalRequests,
+  gotoTab,
+  liveRoomCode,
+  openFirstRecipeDetail,
+  recipeCards,
+  waitForCatalog,
+} from './helpers'
 
 /**
  * Live room sync: two separate browser contexts share plan, custom items
@@ -34,11 +41,8 @@ async function startLiveRoom(page: Page): Promise<string> {
   await gotoTab(page, 'Plan')
   await page.getByRole('button', { name: 'Share', exact: true }).click()
   await page.getByTestId('start-room').click()
-  const chip = page.getByTestId('room-chip')
-  await expect(chip).toContainText('Live', { timeout: 10_000 })
-  // The chip title carries the room code; rebuild the share link.
-  const title = await chip.getAttribute('title')
-  const code = title!.match(/Live room ([a-z0-9-]+)/)![1]
+  // The chip's aria-label carries the room code; rebuild the share link.
+  const code = await liveRoomCode(page)
   return `${page.url().replace(/\/plan.*$/, '')}/plan?room=${code}`
 }
 
@@ -56,7 +60,7 @@ test('room lifecycle: A shares, B joins and both see each other live', async ({ 
   const b = await ctxB.newPage()
   await blockExternalRequests(b)
   await b.goto(roomUrl)
-  await expect(b.getByTestId('room-chip')).toContainText('Live', { timeout: 10_000 })
+  await expect(b.getByTestId('room-chip')).toHaveAttribute('aria-label', /^Live room /, { timeout: 10_000 })
 
   // B received A's plan + custom items without any reload.
   await expect(b.getByRole('heading', { level: 3, name: recipeName })).toBeVisible()
@@ -121,11 +125,11 @@ test('reconnect: reloading B keeps it live in the room', async ({ browser }) => 
   const b = await ctxB.newPage()
   await blockExternalRequests(b)
   await b.goto(roomUrl)
-  await expect(b.getByTestId('room-chip')).toContainText('Live', { timeout: 10_000 })
+  await expect(b.getByTestId('room-chip')).toHaveAttribute('aria-label', /^Live room /, { timeout: 10_000 })
 
   // Full page reload: the session-stored room code re-joins automatically.
   await b.reload()
-  await expect(b.getByTestId('room-chip')).toContainText('Live', { timeout: 10_000 })
+  await expect(b.getByTestId('room-chip')).toHaveAttribute('aria-label', /^Live room /, { timeout: 10_000 })
   // Still receiving state: A edits, B sees it.
   await a.goto('/plan')
   await a.getByRole('button', { name: 'Clear plan' }).click()
@@ -160,7 +164,7 @@ test('room sync: A clears the grocery list and B sees it empty', async ({ browse
   const b = await ctxB.newPage()
   await blockExternalRequests(b)
   await b.goto(roomUrl)
-  await expect(b.getByTestId('room-chip')).toContainText('Live', { timeout: 10_000 })
+  await expect(b.getByTestId('room-chip')).toHaveAttribute('aria-label', /^Live room /, { timeout: 10_000 })
 
   // B initially sees the (non-empty) shared grocery list.
   await b.goto('/grocery')
@@ -199,7 +203,7 @@ test('room sync: remembered custom ingredients (customs) sync as household state
   const b = await ctxB.newPage()
   await blockExternalRequests(b)
   await b.goto(roomUrl)
-  await expect(b.getByTestId('room-chip')).toContainText('Live', { timeout: 10_000 })
+  await expect(b.getByTestId('room-chip')).toHaveAttribute('aria-label', /^Live room /, { timeout: 10_000 })
 
   // A adds an UNKNOWN custom ingredient on the grocery tab…
   await a.goto('/grocery')
@@ -262,7 +266,7 @@ test('share-history toggle: ON by default, the opt-out keeps events off the wire
   const b = await ctxB.newPage()
   await blockExternalRequests(b)
   await b.goto(roomUrl)
-  await expect(b.getByTestId('room-chip')).toContainText('Live', { timeout: 10_000 })
+  await expect(b.getByTestId('room-chip')).toHaveAttribute('aria-label', /^Live room /, { timeout: 10_000 })
 
   // A cooks recipe 2 while sharing is OFF (opted out).
   await gotoTab(a, 'Plan')
@@ -314,14 +318,19 @@ test('joining a code the relay does not know yet CREATES the room (ADR-0026)', a
   await blockExternalRequests(page)
   await page.goto('/plan?room=ember-willow-quartz')
   const chip = page.getByTestId('room-chip')
-  await expect(chip).toContainText('Live', { timeout: 10_000 })
-  await expect(chip).toHaveAttribute('title', 'Live room ember-willow-quartz')
+  await expect(chip).toHaveAttribute('aria-label', /^Live room /, { timeout: 10_000 })
+  // The chip states the room in its aria-label, which the tooltip
+  // repeats verbatim (ADR-0049). This device is the room's first peer.
+  await expect(chip).toHaveAttribute(
+    'aria-label',
+    /^Live room ember-willow-quartz, 1 in room$/,
+  )
 
   // A second device joining that same code lands in the same live room.
   const ctxB = await page.context().browser()!.newContext()
   const b = await ctxB.newPage()
   await blockExternalRequests(b)
   await b.goto('/plan?room=ember-willow-quartz')
-  await expect(b.getByTestId('room-chip')).toContainText('Live', { timeout: 10_000 })
+  await expect(b.getByTestId('room-chip')).toHaveAttribute('aria-label', /^Live room /, { timeout: 10_000 })
   await ctxB.close()
 })

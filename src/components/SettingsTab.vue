@@ -95,78 +95,161 @@ function onRoomBlur() {
 
 const householdCode = computed(() => ui.householdRoom)
 /** Both shapes normalize (ADR-0021): three words, or a legacy code. */
-const canSaveRoom = computed(() => normalizeRoomCode(roomInput.value) !== '')
-/** The live room differs from the saved one, so adopting it is meaningful. */
-const adoptableRoom = computed(() =>
-  room.inRoom && room.code && room.code !== ui.householdRoom ? room.code : null,
+const canJoinRoom = computed(() => {
+  // An EMPTY field is joinable: it will roll a fresh code (ADR-0049). Only
+  // a field the user has half-typed into nonsense is refused, so the
+  // guard the room-words spec pins survives while the empty field became
+  // a useful action instead of a dead end.
+  const draft = roomInput.value.trim()
+  return draft === '' || normalizeRoomCode(draft) !== ''
+})
+/** True while this device is actually connected to the saved room. */
+const householdConnected = computed(
+  () => room.status === 'live' && room.inRoom && room.code === ui.householdRoom,
 )
 
 /** Roll a fresh three-word code into the field (ADR-0021). */
 function newRoomCode() {
   roomTyping = false
   roomInput.value = generateRoomCode()
-  // The rolled code exists NOWHERE yet: Join must CREATE it on the relay
-  // instead of joining (qodo 4128519644).
+  // The rolled code exists NOWHERE yet: joining must CREATE it on the
+  // relay instead of joining (qodo 4128519644).
   rolledNewCode.value = true
 }
 
 /** The live room, else the saved setting — whichever we can share. */
 const shareableCodeText = computed(() => shareableCode())
 
-function saveHouseholdRoom(joinNow: boolean) {
+/**
+ * The card's single mutation entry point (ADR-0049).
+ *
+ * One button, not three. `Save` and `Join now` used to differ only in
+ * *when* the sync started, which is a choice nobody wants to make twice
+ * for a kitchen surface; and `Adopt` existed only to point the setting at
+ * a room this device was already in. All three collapse here:
+ *
+ *  - empty field          → roll a code into it and CREATE it
+ *  - rolled here          → CREATE it (a collision re-rolls rather than
+ *                           silently adopting a stranger's room)
+ *  - a parseable code     → JOIN it (join-or-create, ADR-0026)
+ *  - nonsense             → the button is disabled, so it cannot be pressed
+ *  - already live here    → save + confirm, WITHOUT dropping the socket
+ */
+function joinHouseholdRoom() {
   roomTyping = false
-  const code = normalizeRoomCode(roomInput.value)
+  const draft = roomInput.value.trim()
+  // Empty is not an error here: it means "I have no code yet", and the
+  // answer is to mint one rather than to scold the user.
+  const rolledHere = rolledNewCode.value
+  const code = draft === '' ? generateRoomCode() : normalizeRoomCode(draft)
   if (!code) {
-  ui.showToast('Room codes look like amber-falcon-lantern', { kind: 'error' })
-  return
+    ui.showToast('Room codes look like amber-falcon-lantern', { kind: 'error' })
+    return
   }
-  // Capture before clearing: a freshly ROLLED code is CREATED on the
-  // relay, not joined. Since ADR-0026 a join would establish the room
-  // too — but it would also silently ADOPT an existing room if the
-  // rolled code collided with a live one, whereas `create` answers
-  // `code_taken` and we re-roll (qodo 4128519644).
-  const isNewCode = rolledNewCode.value
+  const isNewCode = rolledHere || draft === ''
   rolledNewCode.value = false
-  ui.setHouseholdRoom(code)
   roomInput.value = code
-  if (joinNow) {
+  ui.setHouseholdRoom(code)
+
+  // Already LIVE in THIS room: reconnecting would drop a healthy socket
+  // just to re-establish it, so the setting is saved and the state
+  // confirmed without touching the connection. `live` and not merely
+  // `inRoom`: the store keeps the code through `error`, the reconnect
+  // backoff and a latched `roomGone`, and in those states the old
+  // condition short-circuited to a success toast that never retried —
+  // the user had to press Leave and join again to get out of a dead room.
+  if (room.status === 'live' && room.inRoom && room.code === code) {
+    ui.showToast(`Household sync active — ${code}`, { kind: 'household' })
+    return
+  }
+
+  // From here the card OWNS the outcome: a `code_taken` re-roll moves
+  // this device into a different room than the one just saved, and the
+  // watcher below adopts whatever code we actually ended up in.
+  pendingHouseholdJoin = true
   if (isNewCode) room.create(code)
   else room.join(code)
   // The toast carries the share action: joining and sharing are the
   // same two-phone moment (ADR-0023).
   ui.showToast(`Joining household ${code}…`, {
-  kind: 'household',
-  actions: [{ label: 'Share link', run: () => void shareRoomLink(code) }],
-  duration: 6000,
+    kind: 'household',
+    actions: [{ label: 'Share link', run: () => void shareRoomLink(code) }],
+    duration: 6000,
   })
-  } else {
-  ui.showToast(`Household room ${code} saved — sync starts on next launch`)
-  }
 }
 
-/** Point the persistent setting at the room we're already in. */
 /**
  * True while roomInput holds a freshly ROLLED (not typed) code — see
- * newRoomCode / saveHouseholdRoom (qodo 4128519644).
+ * newRoomCode / joinHouseholdRoom (qodo 4128519644).
  */
 const rolledNewCode = ref(false)
 
-function adoptCurrentRoom() {
-  const code = adoptableRoom.value
-  if (!code) return
-  roomTyping = false
-  rolledNewCode.value = false
-  roomInput.value = code
-  ui.setHouseholdRoom(code)
-  ui.showToast(`Household sync active — ${code}`, { kind: 'household' })
+/**
+ * True between pressing `Join now` and the store settling. It is what
+ * lets the card adopt a code it did not choose: a rolled code the relay
+ * already holds comes back `code_taken` and the store re-rolls
+ * (ADR-0021), so the room this device ends up in is NOT the one saved a
+ * moment ago — and a saved code we are not in means the next launch
+ * joins a stranger's empty room.
+ */
+let pendingHouseholdJoin = false
+
+watch(
+  () => [room.status, room.code] as const,
+  ([status, code]) => {
+    if (!pendingHouseholdJoin) return
+    // Any terminal answer ends the wait; only a LIVE frame has a code
+    // worth adopting.
+    if (status !== 'live') {
+      if (status === 'error' || status === 'idle') pendingHouseholdJoin = false
+      return
+    }
+    pendingHouseholdJoin = false
+    if (!code || code === roomInput.value) return
+    roomTyping = false
+    roomInput.value = code
+    ui.setHouseholdRoom(code)
+    ui.showToast(`That code was taken — using ${code} instead`, {
+      kind: 'household',
+      duration: 6000,
+    })
+  },
+)
+
+/**
+ * `New code` rolls AND joins (ADR-0049): the owner's point was that a
+ * rolled code which does nothing until a second press is a dead end.
+ */
+function newRoomCodeAndJoin() {
+  newRoomCode()
+  joinHouseholdRoom()
 }
 
+/**
+ * `Leave` is a FULL opt-out (ADR-0049): leaving the socket while KEEPING
+ * the saved code means the household silently rejoins on the next launch,
+ * which is the opposite of what pressing Leave asked for.
+ */
 function clearHouseholdRoom() {
   roomTyping = false
   rolledNewCode.value = false
+  pendingHouseholdJoin = false
+  const saved = ui.householdRoom
+  // Only the room this card is ABOUT. A device that is live in a
+  // Plan-tab or share-link room is holding a different socket, and
+  // pressing the household card's Leave asked about the household room,
+  // not about whatever else happens to be connected. With no saved code
+  // there is nothing else to stop joining, so the live room IS the one
+  // being left.
+  const leavingHousehold = room.inRoom && (saved === '' || room.code === saved)
+  if (leavingHousehold) room.leave()
   ui.setHouseholdRoom('')
   roomInput.value = ''
-  ui.showToast('Household sync turned off')
+  ui.showToast(
+    leavingHousehold
+      ? 'Left the household room — it will not rejoin next launch'
+      : `Stopped joining ${saved} — this device stays in the room it is in`,
+  )
 }
 
 /* ---------- Backup & restore (ADR-0013) ---------- */
@@ -333,14 +416,18 @@ function cancelBackupImport(): void {
   <div class="space-y-2 rounded-xl bg-surface p-3" data-test="household-card">
   <span class="text-sm font-bold tracking-tight">Household sync</span>
   <p class="text-xs">
-  Sync your plan, grocery checks, extras and recipe filters with the other phone. Set the room code once — this device joins it automatically every time the app opens.
+  Sync your plan, grocery checks, extras and recipe filters with the other phone. Join once — this device re-joins the room automatically every time the app opens.
   </p>
+  <!-- Status is shown only while CONNECTED (ADR-0049): "active" while the
+       socket is down would be a claim the relay has not made. The headcount
+       is the relay's number, and `null` (not told yet) is worded as
+       absence rather than as one person. -->
   <p
-  v-if="householdCode"
+  v-if="householdConnected"
   class="text-xs font-semibold text-text"
   data-test="household-room-status"
   >
-  Household sync active — {{ householdCode }}
+  Household sync active — {{ householdCode }}<template v-if="room.peers"> · {{ room.peers }} in room</template>
   </p>
   <!-- Always rendered, never behind a saved-room condition: the note
   on the History tab points here, and a member in a Plan-tab
@@ -382,20 +469,11 @@ function cancelBackupImport(): void {
   class="h-11 min-w-0 flex-1 rounded-xl border bg-surface-raised px-3 text-sm outline-none focus:border-brand-text"
   />
   <button
-  class="h-11 rounded-xl bg-brand px-3 text-sm font-semibold text-on-brand active:bg-brand-strong disabled:opacity-50"
-  data-test="household-room-save"
-  aria-label="Save household room code"
-  :disabled="!canSaveRoom"
-  @click="saveHouseholdRoom(false)"
-  >
-  Save
-  </button>
-  <button
-  class="h-11 rounded-xl border px-3 text-sm font-medium disabled:opacity-50"
+  class="h-11 rounded-xl bg-brand px-4 text-sm font-semibold text-on-brand active:bg-brand-strong disabled:opacity-50"
   data-test="household-room-join"
-  aria-label="Save household room code and join now"
-  :disabled="!canSaveRoom"
-  @click="saveHouseholdRoom(true)"
+  aria-label="Save this household room code and join it now"
+  :disabled="!canJoinRoom"
+  @click="joinHouseholdRoom"
   >
   Join now
   </button>
@@ -412,31 +490,22 @@ function cancelBackupImport(): void {
   Share room link
   </button>
   <button
-  class="h-11 rounded-lg border px-3 text-xs font-medium"
+  class="h-11 rounded-lg bg-brand px-3 text-xs font-semibold text-on-brand active:bg-brand-strong"
   data-test="household-room-new"
-  aria-label="Generate a new three-word room code"
-  @click="newRoomCode"
+  aria-label="Generate a new three-word room code and join it"
+  @click="newRoomCodeAndJoin"
   >
   <Dices :size="14" aria-hidden="true" class="mr-1 inline" />
   New code
   </button>
   <button
-  v-if="adoptableRoom"
-  class="h-11 rounded-lg border px-3 text-xs font-medium"
-  data-test="household-room-adopt"
-  :aria-label="`Use live room ${adoptableRoom} as the household room`"
-  @click="adoptCurrentRoom"
-  >
-  Sync with live room {{ adoptableRoom }}
-  </button>
-  <button
-  v-if="householdCode"
+  v-if="householdCode || room.inRoom"
   class="h-11 rounded-lg border px-3 text-xs font-medium"
   data-test="household-room-clear"
-  aria-label="Turn off household sync"
+  aria-label="Leave the household room and stop joining it on future launches"
   @click="clearHouseholdRoom"
   >
-  Turn off
+  Leave
   </button>
   </div>
   </div>

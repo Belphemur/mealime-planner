@@ -165,6 +165,34 @@ export const useRoomStore = defineStore('room', () => {
   const status = ref<RoomStatus>('idle')
   const code = ref<string | null>(null)
   const error = ref<string | null>(null)
+  /**
+   * How many peers are live in the room, INCLUDING this device (ADR-0049).
+   *
+   * `null` until the relay says otherwise, which is a real third state the
+   * views must render differently from a number: "connecting" is not "one
+   * person". The relay owns the count, so the client never counts
+   * anything -- it only displays what it was last told.
+   */
+  const peers = ref<number | null>(null)
+
+  /**
+   * True from the moment a DELIBERATE join/create was asked for until a
+   * `live` frame answers it (ADR-0049 addendum).
+   *
+   * The status ref cannot express "this device just joined on purpose":
+   * a deliberate join, a page-reload resume and an automatic reconnect all
+   * walk the SAME idle → connecting → live edge, and only the first one
+   * may move the user somewhere. `connect()` therefore takes the signal as
+   * an argument: `join()` and `create()` (the only two entry points a
+   * person can trigger — `resume()` and `scheduleReconnect` call
+   * `connect()` without it) arm the flag, and every other caller DISARMS
+   * it, because `connect()` assigns rather than ors.
+   *
+   * Consumed by whoever reads it (the app shell's post-join landing), and
+   * disarmed on any non-live answer so a failed join cannot navigate
+   * minutes later off a stale flag.
+   */
+  const freshJoin = ref(false)
 
   let ws: WebSocket | null = null
   let localRev = 0
@@ -550,6 +578,7 @@ export const useRoomStore = defineStore('room', () => {
       case 'created': {
         code.value = typeof msg.code === 'string' ? msg.code : null
         if (code.value) sessionStorage.setItem(ROOM_CODE_KEY, code.value)
+        adoptPeerCount(msg.count)
         status.value = 'live'
         reconnectAttempts = 0
         startKeepalive()
@@ -564,6 +593,7 @@ export const useRoomStore = defineStore('room', () => {
         break
       }
       case 'joined': {
+        adoptPeerCount(msg.count)
         status.value = 'live'
         reconnectAttempts = 0
         startKeepalive()
@@ -605,6 +635,13 @@ export const useRoomStore = defineStore('room', () => {
         }
         break
       }
+      case 'peers': {
+        // The only authority on the headcount (ADR-0049). Carried on both
+        // membership changes, so a peer that joins while this device is
+        // mid-cook sees the number move without doing anything.
+        adoptPeerCount(msg.count)
+        break
+      }
       case 'error': {
         if (msg.code === 'code_taken' && ws && wantedCode !== null) {
           // The rolled code is live on the relay already: re-roll (a
@@ -619,7 +656,10 @@ export const useRoomStore = defineStore('room', () => {
           // without a `leave` (review F6), exactly as the message form did.
           codeRerolls++
           wantedCode = codeRerolls <= CODE_REROLL_LIMIT ? generateRoomCode() : null
-          connect('create')
+          // A re-roll continues the DELIBERATE create the user asked for,
+          // so the fresh-join signal rides along (ADR-0049 addendum): a
+          // collision must not cost the joiner their landing page.
+          connect('create', undefined, freshJoin.value)
         } else {
           // Every other relay error, including `room_expired` (ADR-0026)
           // and `not_in_room`. The decision is pure + unit-tested in
@@ -638,6 +678,7 @@ export const useRoomStore = defineStore('room', () => {
             if (outcome.message) error.value = outcome.message
             status.value = 'error'
             roomGone = true
+            freshJoin.value = false
             sessionStorage.removeItem(ROOM_CODE_KEY)
             cleanupSocket()
           } else if (code.value) {
@@ -647,6 +688,7 @@ export const useRoomStore = defineStore('room', () => {
           } else {
             error.value = outcome.message ?? 'Room error'
             status.value = 'error'
+            freshJoin.value = false
             cleanupSocket()
           }
         }
@@ -655,10 +697,15 @@ export const useRoomStore = defineStore('room', () => {
     }
   }
 
-  function connect(role: 'create' | 'join', joinCode?: string) {
-    // A deliberate connect clears the "room is gone" latch — including
+  function connect(role: 'create' | 'join', joinCode?: string, fresh = false) {
+    // A DELIBERATE connect clears the "room is gone" latch — including
     // the join-or-create path, where re-joining re-establishes the room.
+    // `fresh` is the caller's deliberate-join signal (ADR-0049 addendum):
+    // a resume and a reconnect pass nothing, so both DISARM the flag and
+    // can never move somebody's view even when they come back to `live`
+    // with an empty plan.
     roomGone = false
+    freshJoin.value = fresh
     // Review F6: this socket is being RECYCLED, not left. Sending `leave`
     // would tell the relay we are done with a room we intend to re-join,
     // and as the last peer that deletes the room and its state for
@@ -676,6 +723,14 @@ export const useRoomStore = defineStore('room', () => {
     ws = socket
 
     socket.onmessage = (event) => {
+      // A superseded socket's frame is STALE by definition: `connect` has
+      // already replaced `ws` (room switch, reconnect, or a `code_taken`
+      // re-roll), so anything this queue still delivers describes the room
+      // we left. Same guard as `onclose` below, and it matters most for
+      // `peers` (ADR-0049): an old room's headcount landing after the new
+      // room came up would put the wrong number on the chip until the next
+      // membership change.
+      if (ws !== socket) return
       try {
         handleMessage(JSON.parse(event.data as string))
       } catch {
@@ -690,6 +745,7 @@ export const useRoomStore = defineStore('room', () => {
       if (!code.value) {
         // Room never established (initial connect dropped / join rejected).
         status.value = 'error'
+        freshJoin.value = false
         if (!error.value) error.value = 'Connection lost'
         return
       }
@@ -771,15 +827,26 @@ export const useRoomStore = defineStore('room', () => {
     unsentLocalEdit = false
     wantedCode = preferredCode ? normalizeRoomCode(preferredCode) : generateRoomCode()
     codeRerolls = 0
-    connect('create')
+    connect('create', undefined, true)
   }
 
-  /** Join an existing room by code (legacy or three-word, any spelling). */
-  function join(codeToJoin: string) {
+  /**
+   * Join an existing room by code (legacy or three-word, any spelling).
+   *
+   * `deliberate` says a PERSON asked for this join, which is what arms
+   * `freshJoin` (ADR-0049 addendum). Every interactive caller leaves it
+   * true: a `?room=` link, `Join now`, a rolled code. The one caller that
+   * passes `false` is the ADR-0019 household AUTO-join, which runs on
+   * every launch of a device that already has a saved room — arming it
+   * there would move somebody off the tab they opened, once per session,
+   * for a join they never asked for this time round.
+   */
+  function join(codeToJoin: string, deliberate = true) {
     const normalized = normalizeRoomCode(codeToJoin)
     if (!normalized) {
       error.value = 'That is not a room code'
       status.value = 'error'
+      freshJoin.value = false
       return
     }
     // A join into a DIFFERENT code starts clean: an undelivered edit
@@ -789,7 +856,7 @@ export const useRoomStore = defineStore('room', () => {
     code.value = normalized
     sessionStorage.setItem(ROOM_CODE_KEY, code.value)
     reconnectAttempts = 0
-    connect('join', code.value)
+    connect('join', code.value, deliberate)
   }
 
   /**
@@ -805,11 +872,29 @@ export const useRoomStore = defineStore('room', () => {
     return true
   }
 
+  /**
+   * Take a relay-supplied headcount, ignoring anything that is not one.
+   *
+   * A count of `0` for a room we are IN would be a lie (the relay counts
+   * the socket asking), so a non-positive or missing number is treated as
+   * "not known" rather than as a headcount -- the views already render
+   * `null` distinctly. Kept in one place because both the admission frames
+   * and the `peers` fan-out funnel through it.
+   */
+  function adoptPeerCount(value: unknown): void {
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) return
+    peers.value = value
+  }
+
   /** Leave the current room and go back to idle. */
   function leave() {
     code.value = null
     status.value = 'idle'
     error.value = null
+    // The count described THAT room; keeping it would leave a chip
+    // reading "3 in room" for a room this device is no longer in.
+    peers.value = null
+    freshJoin.value = false
     reconnectAttempts = 0
     wantedCode = null
     roomGone = false
@@ -827,6 +912,15 @@ export const useRoomStore = defineStore('room', () => {
     status,
     code,
     error,
+    peers,
+    /**
+     * Armed by a deliberate `join()`/`create()` and still unanswered by a
+     * `live` frame. The app shell reads it to land a first-time joiner on
+     * the recipes list (ADR-0049 addendum); a resume or a reconnect never
+     * arms it, so neither can move the view. `leave()` and every terminal
+     * failure disarm it, so a stale flag cannot navigate later.
+     */
+    freshJoin,
     // computed
     inRoom,
     // actions

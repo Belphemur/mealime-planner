@@ -119,9 +119,23 @@
   --color-nutrition-fat: #7a5f0c;
   --color-nutrition-fat-soft: #e8c86a;
 
-  /* --- Status. Not food identity: never a "what kind of food" cue. --- */
+  /* --- Status. Not food identity: never a "what kind of food" cue. ---
+     `success` is the live-room signal (ADR-0049) and is deliberately a
+     DIFFERENT green from `hue-vegetarian` / `hue-vegan`: it lives in the
+     status family, is never attached to an IconRole, and never rides on a
+     food cue. The header chip is a DOT with no word (ADR-0049 addendum),
+     so the colour is paired with shape and position instead — and the
+     words live in the chip's aria-label and its tooltip bubble, which
+     every status-dot spec asserts. */
   --color-warning: #9a3412;
   --color-warning-soft: #fdba74;
+  --color-success: #116149;
+  --color-success-soft: #34d399;
+  /* Foreground for text sitting ON a `success` fill — the header room chip's
+     badge-dot headcount (ADR-0049). White on the deep green; dark green-black
+     on the light `success-soft` the dark theme flips `success` to, because
+     white on that would be ~1.9:1. */
+  --color-on-success: #ffffff;
   --color-danger: #b91c1c;
   --color-danger-soft: #fca5a5;
   --color-favourite: #e11d48;
@@ -196,6 +210,8 @@
   --color-nutrition-carbs: var(--color-nutrition-carbs-soft, #5cc0d8);
   --color-nutrition-fat: var(--color-nutrition-fat-soft, #e8c86a);
   --color-warning: var(--color-warning-soft, #fdba74);
+  --color-success: var(--color-success-soft, #34d399);
+  --color-on-success: #0a2e22;
   --color-danger: var(--color-danger-soft, #fca5a5);
   --color-favourite: var(--color-favourite-soft);
 

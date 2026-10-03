@@ -122,7 +122,7 @@ describe('room codes are canonicalised by the shared client helper', () => {
 describe('admission (ADR-0026 join-or-create)', () => {
   test('a join onto a code the relay never knew ESTABLISHES the room', () => {
     const h = harness()
-    expect(h.registry.admit('join', 0)).toEqual({ kind: 'establish', code: 'mauve-peacock-candle', rev: 0 })
+    expect(h.registry.admit('join', 0)).toEqual({ kind: 'establish', code: 'mauve-peacock-candle', rev: 0, count: 1 })
     expect(h.store.rooms.get('mauve-peacock-candle')?.state).toBeNull()
   })
 
@@ -135,6 +135,7 @@ describe('admission (ADR-0026 join-or-create)', () => {
       code: 'mauve-peacock-candle',
       rev: 4,
       state: { plan: ['a'] },
+      count: 2,
     })
   })
 
@@ -150,7 +151,20 @@ describe('admission (ADR-0026 join-or-create)', () => {
     // would strand the code with no way to open it.
     const h = harness()
     h.registry.admit('create', 0)
-    expect(h.registry.admit('create', 0)).toEqual({ kind: 'establish', code: 'mauve-peacock-candle', rev: 0 })
+    expect(h.registry.admit('create', 0)).toEqual({ kind: 'establish', code: 'mauve-peacock-candle', rev: 0, count: 1 })
+  })
+
+  test('an admission reports the headcount INCLUDING the arriving peer (ADR-0049)', () => {
+    // The core is the DRY home for `count`: both adapters read it off the
+    // verdict rather than recomputing it, so the two runtimes cannot
+    // disagree about whether the joiner counts itself.
+    const h = harness()
+    expect(h.registry.admit('create', 0)).toMatchObject({ count: 1 })
+    expect(h.registry.admit('join', 1)).toMatchObject({ kind: 'join', count: 2 })
+    expect(h.registry.admit('join', 2)).toMatchObject({ kind: 'join', count: 3 })
+    // A create is REFUSED rather than admitted, so it carries no count and
+    // must not be mistaken for a headcount change.
+    expect(h.registry.admit('create', 3)).toEqual({ kind: 'refuse', error: RELAY_ERRORS.codeTaken })
   })
 
   test('admission refreshes the clocks of the room it admits into', () => {
@@ -245,7 +259,7 @@ describe('the per-code rev floor', () => {
     expect(h.store.rooms.size).toBe(0)
     // Re-created under the same code: created/join reports the FLOOR, so a
     // stale snapshot can never be passed off as newer (review F4).
-    expect(h.registry.admit('join', 0)).toEqual({ kind: 'establish', code: 'mauve-peacock-candle', rev: 11 })
+    expect(h.registry.admit('join', 0)).toEqual({ kind: 'establish', code: 'mauve-peacock-candle', rev: 11, count: 1 })
     expect(h.store.rooms.get('mauve-peacock-candle')!.state).toBeNull()
   })
 
@@ -463,6 +477,6 @@ describe('a room dies with its last peer (ADR-0026)', () => {
     h.registry.push(2, { plan: ['a'] }, 'p1')
     h.registry.leave(0)
     const back = h.registry.admit('join', 0)
-    expect(back).toEqual({ kind: 'establish', code: 'mauve-peacock-candle', rev: 2 })
+    expect(back).toEqual({ kind: 'establish', code: 'mauve-peacock-candle', rev: 2, count: 1 })
   })
 })
